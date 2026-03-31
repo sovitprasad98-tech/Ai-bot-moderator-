@@ -190,9 +190,87 @@ def handle_violation(chat_id, user_id, user: dict, message_id: int, violations: 
 
 
 # ═════════════════════════════════════════════
+#  PRIVATE CHAT — AI CONVERSATION
+# ═════════════════════════════════════════════
+# Store per-user conversation history for private chat
+private_history: dict = defaultdict(list)
+
+PRIVATE_SYSTEM = """You are SentinelAI, a professional and friendly AI assistant bot named @Rules_Ai_SovitX_Bot.
+You were built to moderate Telegram groups and also assist users in private chat.
+Keep responses concise, helpful, and professional. Use simple language.
+You can answer general questions, help with Telegram tips, explain group rules, etc.
+Do NOT use markdown like ** or ##. Use plain text only."""
+
+
+def handle_private_chat(chat_id: int, user: dict, text: str):
+    """Handle private messages — AI conversation."""
+    user_id = user.get("id")
+    name    = user_display(user)
+
+    history = private_history[user_id]
+    history.append({"role": "user", "content": text})
+
+    # Keep last 10 messages only
+    if len(history) > 10:
+        history = history[-10:]
+        private_history[user_id] = history
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_KEY}",
+        "Content-Type":  "application/json",
+    }
+    body = {
+        "model":    "llama-3.3-70b-versatile",
+        "messages": [{"role": "system", "content": PRIVATE_SYSTEM}] + history,
+        "max_tokens":  400,
+        "temperature": 0.7,
+    }
+    try:
+        with httpx.Client(timeout=15) as client:
+            r = client.post(GROQ_URL, headers=headers, json=body)
+        reply = r.json()["choices"][0]["message"]["content"].strip()
+        # Clean any accidental markdown
+        reply = re.sub(r"\*\*|__|\*|##", "", reply).strip()
+    except Exception as e:
+        print(f"[Private Chat AI Error] {e}")
+        reply = "Sorry, I am having trouble connecting right now. Please try again in a moment."
+
+    private_history[user_id].append({"role": "assistant", "content": reply})
+    send_message(chat_id, reply)
+
+
+def send_start_message(chat_id: int, user: dict):
+    """Send introduction when user starts the bot."""
+    name = user_display(user)
+    msg = (
+        f"👋 <b>Hello, {name}!</b>\n\n"
+        f"I am <b>SentinelAI</b> — an intelligent group moderation assistant.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 <b>What I do in Groups:</b>\n"
+        f"  • Delete selling &amp; promotion messages\n"
+        f"  • Block money-luring &amp; DM scam attempts\n"
+        f"  • Remove forwarded messages from other chats\n"
+        f"  • Delete abusive language in any language\n"
+        f"  • Issue warnings — 5 warnings = auto mute\n"
+        f"  • Admins &amp; owners are always exempt\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💬 <b>What I can do for you here:</b>\n"
+        f"  • Answer your questions\n"
+        f"  • Explain group rules\n"
+        f"  • Help with Telegram tips\n"
+        f"  • General AI assistance\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Just type anything to start chatting! 🚀\n\n"
+        f"<i>Powered by SentinelAI v1.0 — @Rules_Ai_SovitX_Bot</i>"
+    )
+    send_message(chat_id, msg)
+
+
+# ═════════════════════════════════════════════
 #  MAIN UPDATE HANDLER
 # ═════════════════════════════════════════════
 def process_update(update: dict):
+    # Support both new messages and edited messages
     message = update.get("message") or update.get("edited_message")
     if not message:
         return
@@ -200,50 +278,76 @@ def process_update(update: dict):
     chat      = message.get("chat", {})
     chat_id   = chat.get("id")
     chat_type = chat.get("type", "private")
-
-    # Only handle group / supergroup
-    if chat_type not in ("group", "supergroup"):
-        return
-
-    user     = message.get("from", {})
-    user_id  = user.get("id")
-    msg_id   = message.get("message_id")
+    user      = message.get("from", {})
+    user_id   = user.get("id")
+    msg_id    = message.get("message_id")
+    text      = (message.get("text") or message.get("caption") or "").strip()
 
     if not user_id or user.get("is_bot"):
         return
 
-    # Skip admins and owner
-    admins = get_admins(chat_id)
+    # ══════════════════════════════════════════
+    #  PRIVATE CHAT
+    # ══════════════════════════════════════════
+    if chat_type == "private":
+        if text == "/start":
+            send_start_message(chat_id, user)
+        elif text:
+            handle_private_chat(chat_id, user, text)
+        return
+
+    # ══════════════════════════════════════════
+    #  GROUP / SUPERGROUP MODERATION
+    # ══════════════════════════════════════════
+    if chat_type not in ("group", "supergroup"):
+        return
+
+    # Skip admins and owner — always exempt
+    try:
+        admins = get_admins(chat_id)
+    except Exception:
+        admins = set()
+
     if user_id in admins:
         return
 
-    # ── Check forwarded ──────────────────────
+    # ── Check if forwarded ───────────────────
     is_forwarded = (
-        "forward_from" in message
+        "forward_from"      in message
         or "forward_from_chat" in message
-        or "forward_origin" in message
+        or "forward_origin"    in message
+        or "forward_date"      in message
     )
 
-    # ── Get text ─────────────────────────────
-    text = (
-        message.get("text")
-        or message.get("caption")
-        or ""
-    ).strip()
-
-    # Forward with no text — still a violation
+    # Forwarded message with no text — delete immediately
     if is_forwarded and not text:
         delete_message(chat_id, msg_id)
         tag = username_tag(user)
-        send_message(chat_id,
-            f"⚠️ <b>Community Guidelines Violation</b>\n\n"
-            f"👤 {tag}\n\n"
-            f"  • 📤 Forwarding Not Allowed\n\n"
-            f"Forwarding messages from other groups or channels is <b>not permitted</b> in this community. "
-            f"— <b>@Rules_Ai_SovitX_Bot</b>"
-        )
+        warnings[chat_id][user_id] += 1
+        count = warnings[chat_id][user_id]
+        remaining = max(WARN_LIMIT - count, 0)
+
+        if count >= WARN_LIMIT:
+            mute_user(chat_id, user_id)
+            warnings[chat_id][user_id] = 0
+            send_message(chat_id,
+                f"⚠️ <b>Community Guidelines Violation</b>\n\n"
+                f"👤 {tag}\n\n"
+                f"  • 📤 Forwarding Not Allowed\n\n"
+                f"🔇 <b>You have been muted</b> for repeated violations.\n"
+                f"Contact a group admin to appeal. — <b>@Rules_Ai_SovitX_Bot</b>"
+            )
+        else:
+            send_message(chat_id,
+                f"⚠️ <b>Community Guidelines Violation</b>\n\n"
+                f"👤 {tag}, your forwarded message was removed.\n\n"
+                f"  • 📤 Forwarding messages from other groups or channels is <b>not allowed</b> here.\n\n"
+                f"📋 <b>Warning {count} of {WARN_LIMIT}</b> — {remaining} warning(s) left before mute.\n"
+                f"— <b>@Rules_Ai_SovitX_Bot</b>"
+            )
         return
 
+    # No text to analyze
     if not text:
         return
 
@@ -253,6 +357,6 @@ def process_update(update: dict):
     reason     = result.get("reason", "")
 
     if "clean" in violations and len(violations) == 1:
-        return  # Message is fine
+        return  # Message is fine — do nothing
 
     handle_violation(chat_id, user_id, user, msg_id, violations, reason)
