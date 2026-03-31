@@ -22,7 +22,7 @@ def main():
         # Set webhook
         r = client.post(f"{TG_API}/setWebhook", json={
             "url":             webhook_url,
-            "allowed_updates": ["message", "edited_message"],
+            "allowed_updates": ["message", "edited_message", "callback_query"],
             "drop_pending_updates": True
         })
         data = r.json()
