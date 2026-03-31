@@ -78,12 +78,12 @@ async def unmute_user(bot, chat_id: int, user_id: int):
     )
 
 
-async def _delete_msg(context: ContextTypes.DEFAULT_TYPE):
+async def _delete_msg_later(bot, chat_id: int, message_id: int, delay: int):
+    """Delete message after delay using asyncio sleep"""
+    import asyncio
+    await asyncio.sleep(delay)
     try:
-        await context.bot.delete_message(
-            chat_id=context.job.data['chat_id'],
-            message_id=context.job.data['message_id']
-        )
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
 
@@ -404,10 +404,8 @@ async def _handle_violation(context, message, user, chat_id, violations, reason)
                 chat_id=chat_id, text=mute_text,
                 parse_mode='MarkdownV2', reply_markup=keyboard
             )
-            context.job_queue.run_once(
-                _delete_msg, MUTE_AUTO_DEL,
-                data={'chat_id': chat_id, 'message_id': sent.message_id}
-            )
+            import asyncio
+            asyncio.create_task(_delete_msg_later(context.bot, chat_id, sent.message_id, MUTE_AUTO_DEL))
             logger.info(f"MUTED: {user.full_name} ({user.id})")
 
         except Exception as e:
@@ -426,10 +424,8 @@ async def _handle_violation(context, message, user, chat_id, violations, reason)
         sent = await context.bot.send_message(
             chat_id=chat_id, text=warn_text, parse_mode='MarkdownV2'
         )
-        context.job_queue.run_once(
-            _delete_msg, WARN_AUTO_DEL,
-            data={'chat_id': chat_id, 'message_id': sent.message_id}
-        )
+        import asyncio
+        asyncio.create_task(_delete_msg_later(context.bot, chat_id, sent.message_id, WARN_AUTO_DEL))
         logger.info(f"WARNING {count}/{MAX_WARNINGS}: {user.full_name} — {violations}")
 
 
