@@ -1,90 +1,57 @@
-"""
-Vercel Serverless Function — Telegram Webhook Endpoint
-Route: /api/webhook
-"""
-import json
-import sys
-import os
+from telegram import Update
+from telegram.ext import (
+    Application, MessageHandler, CommandHandler,
+    CallbackQueryHandler, filters
+)
+from http.server import BaseHTTPRequestHandler
+import json, os, asyncio, sys
 
-# Make sure parent directory is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main import process_update
+from main import (
+    start_command, help_command, warnings_command,
+    reset_warn_command, group_moderator, private_chat_handler,
+    button_callback, BOT_TOKEN
+)
 
 
-def handler(request, response=None):
-    """
-    Vercel Python serverless handler.
-    Compatible with Vercel's Python runtime (WSGI / raw handler).
-    """
-    # ── Vercel calls this as a WSGI-style callable ──
-    # But for simple webhook we support both styles.
+async def process_update(update_data):
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    if callable(getattr(request, "get_json", None)):
-        # Flask-style (if using Flask adapter)
-        data = request.get_json(force=True, silent=True) or {}
-    elif hasattr(request, "body"):
-        # Raw Vercel request object
-        try:
-            body = request.body
-            if isinstance(body, bytes):
-                body = body.decode("utf-8")
-            data = json.loads(body) if body else {}
-        except Exception:
-            data = {}
-    else:
-        data = {}
+    app.add_handler(CommandHandler("start",     start_command))
+    app.add_handler(CommandHandler("help",      help_command))
+    app.add_handler(CommandHandler("warnings",  warnings_command,   filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("resetwarn", reset_warn_command, filters=filters.ChatType.GROUPS))
+    app.add_handler(CallbackQueryHandler(button_callback))
 
-    try:
-        process_update(data)
-    except Exception as e:
-        print(f"[Handler Error] {e}")
+    # Private chat AI
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        private_chat_handler
+    ))
 
-    # Always return 200 to Telegram
-    return _ok_response()
+    # Group moderation
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & ~filters.COMMAND,
+        group_moderator
+    ))
+
+    await app.initialize()
+    update = Update.de_json(update_data, app.bot)
+    await app.process_update(update)
+    await app.shutdown()
 
 
-def _ok_response():
-    """Return a minimal HTTP 200 response."""
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        body = self.rfile.read(content_length)
+        update_data = json.loads(body.decode('utf-8'))
+        asyncio.run(process_update(update_data))
+        self.send_response(200)
+        self.end_headers()
 
-    class SimpleResponse:
-        status_code = 200
-        headers = {"Content-Type": "application/json"}
-
-        def __call__(self, environ, start_response):
-            start_response(
-                "200 OK",
-                [("Content-Type", "application/json")],
-            )
-            return [b'{"ok":true}']
-
-    return SimpleResponse()
-
-
-# ── WSGI app entry for Vercel ──────────────────────────────────────────────────
-def app(environ, start_response):
-    """
-    Vercel Python Runtime WSGI entry point.
-    Vercel sets VERCEL_REGION env var and calls this function.
-    """
-    method = environ.get("REQUEST_METHOD", "GET")
-
-    if method == "GET":
-        # Health check
-        start_response("200 OK", [("Content-Type", "application/json")])
-        return [b'{"status":"SentinelAI Bot is running"}']
-
-    if method == "POST":
-        try:
-            length = int(environ.get("CONTENT_LENGTH", 0) or 0)
-            body   = environ["wsgi.input"].read(length)
-            data   = json.loads(body.decode("utf-8")) if body else {}
-            process_update(data)
-        except Exception as e:
-            print(f"[WSGI Error] {e}")
-
-        start_response("200 OK", [("Content-Type", "application/json")])
-        return [b'{"ok":true}']
-
-    start_response("405 Method Not Allowed", [("Content-Type", "application/json")])
-    return [b'{"error":"Method not allowed"}']
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'SentinelAI Bot is running!')
